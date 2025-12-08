@@ -10,6 +10,9 @@ This repository provides a helper script to crawl public cemetery listings on Pe
 pip install -r requirements.txt
 ```
 
+> If you see an error mentioning `openpyxl` when writing Excel files, double-check that
+> `pip install -r requirements.txt` completed successfully.
+
 2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes:
 
 ```bash

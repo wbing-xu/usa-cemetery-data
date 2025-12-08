@@ -2,3 +2,4 @@ beautifulsoup4>=4.12
 pandas>=2.2
 requests>=2.31
 tqdm>=4.66
+openpyxl>=3.1

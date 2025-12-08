@@ -217,6 +217,10 @@ def build_normal_distribution_table(areas: List[float], bins: int = 10) -> pd.Da
 def export_to_excel(records: List[CemeteryRecord], path: str) -> None:
     df = pd.DataFrame([asdict(r) for r in records if r.area_acres is not None])
     distribution = build_normal_distribution_table(df["area_acres"].tolist()) if not df.empty else pd.DataFrame()
+    log(
+        f"Writing {len(df)} cemeteries with acreage to {path} "
+        f"(distribution rows: {len(distribution)})"
+    )
     with pd.ExcelWriter(path) as writer:
         df.to_excel(writer, sheet_name="cemeteries", index=False)
         distribution.to_excel(writer, sheet_name="area_distribution", index=False)
