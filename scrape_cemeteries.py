@@ -15,6 +15,11 @@ BASE_URL = "https://peoplelegacy.com/cemeteries/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; data-request-script/1.0)"}
 
 
+def log(message: str) -> None:
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
+
+
 def get_soup(url: str) -> BeautifulSoup:
     response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
@@ -30,6 +35,7 @@ def extract_state_links() -> List[str]:
     cemeteries path and ends with a trailing slash.
     """
 
+    log("Fetching state directory page...")
     soup = get_soup(BASE_URL)
     links = []
     for anchor in soup.select("a[href]"):
@@ -156,16 +162,36 @@ def crawl_cemetery_areas(limit_states: Optional[int] = None, delay: float = 0.5)
     records: List[CemeteryRecord] = []
     state_links = extract_state_links()
     total_states = len(state_links)
-    print(f"Found {total_states} state links. Starting crawl...")
+    log(f"Found {total_states} state links. Starting crawl...")
+    total_cemeteries = 0
+    total_with_area = 0
     for idx, state_link in enumerate(state_links):
         if limit_states is not None and idx >= limit_states:
             break
-        print(f"[{idx + 1}/{total_states}] Crawling {state_link} ...")
+        log(f"[{idx + 1}/{total_states}] Crawling {state_link} ...")
+        state_cemeteries = 0
+        state_with_area = 0
         for count, (state, city, name, url) in enumerate(parse_cemetery_list(state_link), start=1):
-            print(f"  - ({count}) {name} ({city}, {state}) -> searching area", flush=True)
+            state_cemeteries += 1
+            total_cemeteries += 1
+            log(f"  - ({count}) {name} ({city}, {state}) -> searching area")
             area, source = search_wikipedia_area(f"{name} {city} {state} cemetery area")
+            if area is not None:
+                state_with_area += 1
+                total_with_area += 1
+                log(f"    • area found: {area:.2f} acres")
+            else:
+                log("    • no area found")
             records.append(CemeteryRecord(state=state, city=city, name=name, area_acres=area, source=source))
             time.sleep(delay)
+        log(
+            f"Finished state {state_link} — processed {state_cemeteries} cemeteries, "
+            f"found areas for {state_with_area}"
+        )
+    log(
+        f"Crawl complete. Cemeteries processed: {total_cemeteries}. "
+        f"Areas found: {total_with_area}. Missing areas: {total_cemeteries - total_with_area}."
+    )
     return records
 
 
@@ -213,10 +239,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
-    print("Starting crawl. This requires internet access and may take time...")
+    start = time.time()
+    log(
+        "Starting crawl. This requires internet access and may take time... "
+        "Watch the log messages for progress."
+    )
     records = crawl_cemetery_areas(limit_states=args.limit_states, delay=args.delay)
     export_to_excel(records, args.output)
-    print(f"Finished. Output written to {args.output}")
+    duration = time.time() - start
+    log(f"Finished in {duration:.1f} seconds. Output written to {args.output}")
 
 
 if __name__ == "__main__":

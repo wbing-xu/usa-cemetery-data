@@ -10,7 +10,7 @@ This repository provides a helper script to crawl public cemetery listings on Pe
 pip install -r requirements.txt
 ```
 
-2. Run the crawler (internet access required). During the run you will see progress printed for each state and cemetery:
+2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes:
 
 ```bash
 # Full crawl (slow):
@@ -26,6 +26,19 @@ The script writes `cemetery_areas.xlsx` with two sheets:
 - `area_distribution`: binned acreage counts and relative shares to help visualize the acreage distribution.
 
 > **Note:** The scraper relies on the current HTML structure of https://peoplelegacy.com/cemeteries/. If the site changes, you may need to adjust the CSS selectors inside `scrape_cemeteries.py`. Wikipedia searches may not return acreage for every cemetery; rows without acreage are skipped from the distribution calculation.
+
+You will know the script is still running when you see timestamped lines such as:
+
+```
+[12:00:00] Starting crawl. This requires internet access and may take time... Watch the log messages for progress.
+[12:00:02] [1/51] Crawling https://peoplelegacy.com/cemeteries/alabama/ ...
+[12:00:05]   - (3) Memorial Gardens (Example City, Alabama) -> searching area
+[12:00:06]     • area found: 12.50 acres
+...
+[12:05:30] Finished state https://peoplelegacy.com/cemeteries/alabama/ — processed 120 cemeteries, found areas for 17
+[12:05:30] Crawl complete. Cemeteries processed: 120. Areas found: 17. Missing areas: 103.
+[12:05:30] Finished in 330.5 seconds. Output written to cemetery_areas.xlsx
+```
 
 If you do not see any output:
 
