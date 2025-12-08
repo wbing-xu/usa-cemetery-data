@@ -34,8 +34,13 @@ python scrape_cemeteries.py --no-checkpoint
 
 The script writes `cemetery_areas.xlsx` with two sheets:
 
-- `cemeteries`: state, city, cemetery name, acreage, and the Wikipedia page that supplied the area.
+- `cemeteries`: state, city, cemetery name, acreage, and the Wikipedia page (or other page) that specifically contained the acreage figure.
 - `area_distribution`: binned acreage counts and relative shares to help visualize the acreage distribution.
+
+Checkpoint and live-preview CSVs keep two separate link columns so you can validate data after interruptions:
+
+- `area_source`: the page that provided the acreage value (saved only when an area is found).
+- `cemetery_url`: the original PeopleLegacy listing used to find the cemetery.
 
 > **Note:** The scraper relies on the current HTML structure of https://peoplelegacy.com/cemeteries/. If the site changes, you may need to adjust the CSS selectors inside `scrape_cemeteries.py`. Wikipedia searches may not return acreage for every cemetery; rows without acreage are skipped from the distribution calculation.
 

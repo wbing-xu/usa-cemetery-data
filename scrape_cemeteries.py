@@ -66,8 +66,8 @@ class CemeteryRecord:
     city: str
     name: str
     area_acres: Optional[float]
-    source: Optional[str]
-    url: str
+    area_source: Optional[str]
+    cemetery_url: str
 
 
 AREA_PATTERNS = [
@@ -76,7 +76,14 @@ AREA_PATTERNS = [
     re.compile(r"(\d+[\d,.]*)\s*ha", re.IGNORECASE),
 ]
 
-CHECKPOINT_FIELDS = ["state", "city", "name", "area_acres", "source", "url"]
+CHECKPOINT_FIELDS = [
+    "state",
+    "city",
+    "name",
+    "area_acres",
+    "area_source",
+    "cemetery_url",
+]
 
 
 def extract_area(text: str) -> Optional[float]:
@@ -157,9 +164,9 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
         name = anchor.get_text(strip=True)
         if not name:
             continue
-        url = requests.compat.urljoin(state_url, href)
+        cemetery_url = requests.compat.urljoin(state_url, href)
         city = anchor.find_parent("li").find_previous("h2").get_text(strip=True) if anchor.find_parent("li") else ""
-        yield state_name, city, name, url
+        yield state_name, city, name, cemetery_url
 
 
 def load_checkpoint(path: str) -> Tuple[List[CemeteryRecord], Set[str]]:
@@ -170,8 +177,8 @@ def load_checkpoint(path: str) -> Tuple[List[CemeteryRecord], Set[str]]:
     with open(path, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            url = row.get("url") or ""
-            processed.add(url)
+            cemetery_url = row.get("cemetery_url") or row.get("url") or ""
+            processed.add(cemetery_url)
             area_raw = row.get("area_acres") or ""
             area_value = None
             try:
@@ -184,8 +191,8 @@ def load_checkpoint(path: str) -> Tuple[List[CemeteryRecord], Set[str]]:
                     city=row.get("city", ""),
                     name=row.get("name", ""),
                     area_acres=area_value,
-                    source=row.get("source") or None,
-                    url=url,
+                    area_source=row.get("area_source") or row.get("source") or None,
+                    cemetery_url=cemetery_url,
                 )
             )
     log(f"Loaded {len(records)} existing records from checkpoint {path}")
@@ -203,8 +210,8 @@ def append_checkpoint(record: CemeteryRecord, path: str) -> None:
             "city": record.city,
             "name": record.name,
             "area_acres": record.area_acres if record.area_acres is not None else "",
-            "source": record.source or "",
-            "url": record.url,
+            "area_source": record.area_source or "",
+            "cemetery_url": record.cemetery_url,
         })
     log(f"    • checkpoint saved to {path}")
 
@@ -221,8 +228,8 @@ def write_live_preview(records: List[CemeteryRecord], path: str) -> None:
                 "city": record.city,
                 "name": record.name,
                 "area_acres": record.area_acres if record.area_acres is not None else "",
-                "source": record.source or "",
-                "url": record.url,
+                "area_source": record.area_source or "",
+                "cemetery_url": record.cemetery_url,
             })
     log(f"    • live preview updated at {path}")
 
@@ -248,9 +255,13 @@ def crawl_cemetery_areas(
         log(f"[{idx + 1}/{total_states}] Crawling {state_link} ...")
         state_cemeteries = 0
         state_with_area = 0
-        for count, (state, city, name, url) in enumerate(parse_cemetery_list(state_link), start=1):
-            if url in processed_urls:
-                log(f"  - ({count}) {name} ({city}, {state}) already processed — skipping")
+        for count, (state, city, name, cemetery_url) in enumerate(
+            parse_cemetery_list(state_link), start=1
+        ):
+            if cemetery_url in processed_urls:
+                log(
+                    f"  - ({count}) {name} ({city}, {state}) already processed — skipping"
+                )
                 continue
             state_cemeteries += 1
             total_cemeteries += 1
@@ -263,10 +274,15 @@ def crawl_cemetery_areas(
             else:
                 log("    • no area found")
             record = CemeteryRecord(
-                state=state, city=city, name=name, area_acres=area, source=source, url=url
+                state=state,
+                city=city,
+                name=name,
+                area_acres=area,
+                area_source=source,
+                cemetery_url=cemetery_url,
             )
             records.append(record)
-            processed_urls.add(url)
+            processed_urls.add(cemetery_url)
             if checkpoint_path:
                 append_checkpoint(record, checkpoint_path)
             if live_preview_path:
@@ -305,10 +321,12 @@ def build_normal_distribution_table(areas: List[float], bins: int = 10) -> pd.Da
 def export_to_excel(records: List[CemeteryRecord], path: str) -> None:
     df = pd.DataFrame([asdict(r) for r in records if r.area_acres is not None])
     if df.empty:
-        export_df = pd.DataFrame(columns=["state", "city", "name", "area_acres", "source"])
+        export_df = pd.DataFrame(
+            columns=["state", "city", "name", "area_acres", "area_source"]
+        )
         distribution = pd.DataFrame()
     else:
-        export_df = df[["state", "city", "name", "area_acres", "source"]]
+        export_df = df[["state", "city", "name", "area_acres", "area_source"]]
         distribution = build_normal_distribution_table(export_df["area_acres"].tolist())
     log(
         f"Writing {len(export_df)} cemeteries with acreage to {path} "
