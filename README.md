@@ -66,7 +66,7 @@ If you do not see any output:
 
 ## Cleaning an existing checkpoint
 
-If you already have a `cemetery_checkpoint2.csv` file and want to keep only verified acreage rows:
+If you already have a `cemetery_checkpoint2.csv` file and want to keep only verified acreage rows (without touching `scrape_cemeteries.py`):
 
 ```bash
 # Produces validated_cemetery_areas.csv with columns: cemetery_name, area_acres, area_source
