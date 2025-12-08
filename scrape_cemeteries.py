@@ -1,9 +1,12 @@
+import argparse
 import math
 import re
+import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Iterable, List, Optional
 
+import numpy as np
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -151,10 +154,15 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
 
 def crawl_cemetery_areas(limit_states: Optional[int] = None, delay: float = 0.5) -> List[CemeteryRecord]:
     records: List[CemeteryRecord] = []
-    for idx, state_link in enumerate(extract_state_links()):
+    state_links = extract_state_links()
+    total_states = len(state_links)
+    print(f"Found {total_states} state links. Starting crawl...")
+    for idx, state_link in enumerate(state_links):
         if limit_states is not None and idx >= limit_states:
             break
-        for state, city, name, url in parse_cemetery_list(state_link):
+        print(f"[{idx + 1}/{total_states}] Crawling {state_link} ...")
+        for count, (state, city, name, url) in enumerate(parse_cemetery_list(state_link), start=1):
+            print(f"  - ({count}) {name} ({city}, {state}) -> searching area", flush=True)
             area, source = search_wikipedia_area(f"{name} {city} {state} cemetery area")
             records.append(CemeteryRecord(state=state, city=city, name=name, area_acres=area, source=source))
             time.sleep(delay)
@@ -165,7 +173,7 @@ def build_normal_distribution_table(areas: List[float], bins: int = 10) -> pd.Da
     if not areas:
         return pd.DataFrame(columns=["bin_start_acres", "bin_end_acres", "count", "share"])
     series = pd.Series(areas)
-    counts, bin_edges = pd.np.histogram(series, bins=bins)
+    counts, bin_edges = np.histogram(series, bins=bins)
     total = counts.sum()
     rows = []
     for start, end, count in zip(bin_edges[:-1], bin_edges[1:], counts):
@@ -188,12 +196,28 @@ def export_to_excel(records: List[CemeteryRecord], path: str) -> None:
         distribution.to_excel(writer, sheet_name="area_distribution", index=False)
 
 
-def main() -> None:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Crawl PeopleLegacy and fetch cemetery acreage from Wikipedia.")
+    parser.add_argument("--output", default="cemetery_areas.xlsx", help="Path for the output Excel file.")
+    parser.add_argument(
+        "--limit-states",
+        type=int,
+        default=None,
+        help="Limit how many state pages to crawl (useful for quick tests).",
+    )
+    parser.add_argument(
+        "--delay", type=float, default=0.5, help="Seconds to sleep between Wikipedia requests to be polite."
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
     print("Starting crawl. This requires internet access and may take time...")
-    records = crawl_cemetery_areas()
-    export_to_excel(records, "cemetery_areas.xlsx")
-    print("Finished. Output written to cemetery_areas.xlsx")
+    records = crawl_cemetery_areas(limit_states=args.limit_states, delay=args.delay)
+    export_to_excel(records, args.output)
+    print(f"Finished. Output written to {args.output}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
