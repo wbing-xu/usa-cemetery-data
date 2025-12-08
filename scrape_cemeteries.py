@@ -1,10 +1,11 @@
 import argparse
-import math
+import csv
+import os
 import re
 import sys
 import time
 from dataclasses import asdict, dataclass
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -66,6 +67,7 @@ class CemeteryRecord:
     name: str
     area_acres: Optional[float]
     source: Optional[str]
+    url: str
 
 
 AREA_PATTERNS = [
@@ -73,6 +75,8 @@ AREA_PATTERNS = [
     re.compile(r"(\d+[\d,.]*)\s*acre", re.IGNORECASE),
     re.compile(r"(\d+[\d,.]*)\s*ha", re.IGNORECASE),
 ]
+
+CHECKPOINT_FIELDS = ["state", "city", "name", "area_acres", "source", "url"]
 
 
 def extract_area(text: str) -> Optional[float]:
@@ -158,13 +162,67 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
         yield state_name, city, name, url
 
 
-def crawl_cemetery_areas(limit_states: Optional[int] = None, delay: float = 0.5) -> List[CemeteryRecord]:
+def load_checkpoint(path: str) -> Tuple[List[CemeteryRecord], Set[str]]:
     records: List[CemeteryRecord] = []
+    processed: Set[str] = set()
+    if not path or not os.path.exists(path):
+        return records, processed
+    with open(path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            url = row.get("url") or ""
+            processed.add(url)
+            area_raw = row.get("area_acres") or ""
+            area_value = None
+            try:
+                area_value = float(area_raw) if area_raw else None
+            except ValueError:
+                area_value = None
+            records.append(
+                CemeteryRecord(
+                    state=row.get("state", ""),
+                    city=row.get("city", ""),
+                    name=row.get("name", ""),
+                    area_acres=area_value,
+                    source=row.get("source") or None,
+                    url=url,
+                )
+            )
+    log(f"Loaded {len(records)} existing records from checkpoint {path}")
+    return records, processed
+
+
+def append_checkpoint(record: CemeteryRecord, path: str) -> None:
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CHECKPOINT_FIELDS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({
+            "state": record.state,
+            "city": record.city,
+            "name": record.name,
+            "area_acres": record.area_acres if record.area_acres is not None else "",
+            "source": record.source or "",
+            "url": record.url,
+        })
+    log(f"    • checkpoint saved to {path}")
+
+
+def crawl_cemetery_areas(
+    limit_states: Optional[int] = None,
+    delay: float = 0.5,
+    records: Optional[List[CemeteryRecord]] = None,
+    processed_urls: Optional[Set[str]] = None,
+    checkpoint_path: Optional[str] = None,
+) -> List[CemeteryRecord]:
+    records = records or []
+    processed_urls = processed_urls or set()
     state_links = extract_state_links()
     total_states = len(state_links)
     log(f"Found {total_states} state links. Starting crawl...")
-    total_cemeteries = 0
-    total_with_area = 0
+    total_cemeteries = len(processed_urls)
+    total_with_area = len([r for r in records if r.area_acres is not None])
     for idx, state_link in enumerate(state_links):
         if limit_states is not None and idx >= limit_states:
             break
@@ -172,6 +230,9 @@ def crawl_cemetery_areas(limit_states: Optional[int] = None, delay: float = 0.5)
         state_cemeteries = 0
         state_with_area = 0
         for count, (state, city, name, url) in enumerate(parse_cemetery_list(state_link), start=1):
+            if url in processed_urls:
+                log(f"  - ({count}) {name} ({city}, {state}) already processed — skipping")
+                continue
             state_cemeteries += 1
             total_cemeteries += 1
             log(f"  - ({count}) {name} ({city}, {state}) -> searching area")
@@ -182,7 +243,13 @@ def crawl_cemetery_areas(limit_states: Optional[int] = None, delay: float = 0.5)
                 log(f"    • area found: {area:.2f} acres")
             else:
                 log("    • no area found")
-            records.append(CemeteryRecord(state=state, city=city, name=name, area_acres=area, source=source))
+            record = CemeteryRecord(
+                state=state, city=city, name=name, area_acres=area, source=source, url=url
+            )
+            records.append(record)
+            processed_urls.add(url)
+            if checkpoint_path:
+                append_checkpoint(record, checkpoint_path)
             time.sleep(delay)
         log(
             f"Finished state {state_link} — processed {state_cemeteries} cemeteries, "
@@ -216,13 +283,18 @@ def build_normal_distribution_table(areas: List[float], bins: int = 10) -> pd.Da
 
 def export_to_excel(records: List[CemeteryRecord], path: str) -> None:
     df = pd.DataFrame([asdict(r) for r in records if r.area_acres is not None])
-    distribution = build_normal_distribution_table(df["area_acres"].tolist()) if not df.empty else pd.DataFrame()
+    if df.empty:
+        export_df = pd.DataFrame(columns=["state", "city", "name", "area_acres", "source"])
+        distribution = pd.DataFrame()
+    else:
+        export_df = df[["state", "city", "name", "area_acres", "source"]]
+        distribution = build_normal_distribution_table(export_df["area_acres"].tolist())
     log(
-        f"Writing {len(df)} cemeteries with acreage to {path} "
+        f"Writing {len(export_df)} cemeteries with acreage to {path} "
         f"(distribution rows: {len(distribution)})"
     )
     with pd.ExcelWriter(path) as writer:
-        df.to_excel(writer, sheet_name="cemeteries", index=False)
+        export_df.to_excel(writer, sheet_name="cemeteries", index=False)
         distribution.to_excel(writer, sheet_name="area_distribution", index=False)
 
 
@@ -238,20 +310,50 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--delay", type=float, default=0.5, help="Seconds to sleep between Wikipedia requests to be polite."
     )
+    parser.add_argument(
+        "--checkpoint",
+        default="cemetery_checkpoint.csv",
+        help="CSV file used to save progress while crawling (also used to resume).",
+    )
+    parser.add_argument(
+        "--no-checkpoint",
+        action="store_true",
+        help="Disable writing checkpoint CSVs (progress cannot be resumed).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     args = parse_args(argv)
+    checkpoint_path = None if args.no_checkpoint else args.checkpoint
+    records: List[CemeteryRecord]
+    processed_urls: Set[str]
+    if checkpoint_path:
+        records, processed_urls = load_checkpoint(checkpoint_path)
+    else:
+        records, processed_urls = [], set()
     start = time.time()
     log(
         "Starting crawl. This requires internet access and may take time... "
         "Watch the log messages for progress."
     )
-    records = crawl_cemetery_areas(limit_states=args.limit_states, delay=args.delay)
-    export_to_excel(records, args.output)
-    duration = time.time() - start
-    log(f"Finished in {duration:.1f} seconds. Output written to {args.output}")
+    try:
+        crawl_cemetery_areas(
+            limit_states=args.limit_states,
+            delay=args.delay,
+            records=records,
+            processed_urls=processed_urls,
+            checkpoint_path=checkpoint_path,
+        )
+    except KeyboardInterrupt:
+        log("Interrupted by user — exporting partial progress from checkpoint and memory.")
+    except Exception as exc:
+        log(f"Error encountered: {exc}. Writing partial output before exiting.")
+        raise
+    finally:
+        export_to_excel(records, args.output)
+        duration = time.time() - start
+        log(f"Finished in {duration:.1f} seconds. Output written to {args.output}")
 
 
 if __name__ == "__main__":

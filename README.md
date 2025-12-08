@@ -13,14 +13,20 @@ pip install -r requirements.txt
 > If you see an error mentioning `openpyxl` when writing Excel files, double-check that
 > `pip install -r requirements.txt` completed successfully.
 
-2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes:
+2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes. Progress is continually written to `cemetery_checkpoint.csv` so you can resume if the process stops unexpectedly:
 
 ```bash
-# Full crawl (slow):
+# Full crawl (slow) with default checkpointing:
 python scrape_cemeteries.py
 
 # Quick smoke test for 1 state (prints progress to the terminal):
 python scrape_cemeteries.py --limit-states 1 --output test.xlsx
+
+# Resume from a previous checkpoint file (created automatically unless disabled):
+python scrape_cemeteries.py --output resumed.xlsx --checkpoint cemetery_checkpoint.csv
+
+# Disable checkpoint writing if you want a one-off run:
+python scrape_cemeteries.py --no-checkpoint
 ```
 
 The script writes `cemetery_areas.xlsx` with two sheets:
@@ -48,6 +54,7 @@ If you do not see any output:
 - Ensure you are running with internet access (PeopleLegacy and Wikipedia are both required).
 - Try the smoke-test command above to verify progress logging.
 - Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs.
+- If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off.
 
 ## Environment limitations
 
