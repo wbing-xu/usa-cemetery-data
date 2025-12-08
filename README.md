@@ -1,6 +1,6 @@
 # USA Cemetery Data Helper
 
-This repository provides a helper script to crawl public cemetery listings on PeopleLegacy, look up available acreage information from Wikipedia, and export the results to Excel. The crawl collects cemeteries by state, attempts to find acreage information for each cemetery, and builds a second sheet with a histogram-style normal distribution table.
+This repository provides a helper script to crawl public cemetery listings on PeopleLegacy, look up available acreage information from Wikipedia, and export the results to Excel. The crawl collects cemeteries by state, walks into each city's page to reach every individual cemetery listing, attempts to find acreage information for each cemetery, and builds a second sheet with a histogram-style normal distribution table.
 
 ## Usage
 
@@ -40,7 +40,7 @@ The script writes `cemetery_areas.xlsx` with two sheets:
 Checkpoint and live-preview CSVs keep two separate link columns so you can validate data after interruptions:
 
 - `area_source`: the page that provided the acreage value (saved only when an area is found).
-- `cemetery_url`: the original PeopleLegacy listing used to find the cemetery.
+- `cemetery_url`: the original PeopleLegacy listing used to find the cemetery (the scraper now follows the state page into each city page and finally into the cemetery detail page, so this link points at the individual cemetery, not just the city listing).
 
 > **Note:** The scraper relies on the current HTML structure of https://peoplelegacy.com/cemeteries/. If the site changes, you may need to adjust the CSS selectors inside `scrape_cemeteries.py`. Wikipedia searches may not return acreage for every cemetery; rows without acreage are skipped from the distribution calculation.
 

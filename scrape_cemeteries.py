@@ -147,26 +147,47 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
 def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
     """Yield (state, city, name, cemetery_url) entries for a state.
 
-    PeopleLegacy lists cemeteries by city inside the state page. The
-    implementation collects cemetery anchors whose href contains the state slug
-    to avoid pulling unrelated links.
+    PeopleLegacy lists cities on each state page, and each city page lists the
+    cemeteries. This function walks state -> city -> cemetery pages so that the
+    yielded cemetery_url points directly to the cemetery detail page (not the
+    city listing), which provides the most complete metadata for downstream
+    checks.
     """
 
     soup = get_soup(state_url)
     state_slug = state_url.rstrip("/").split("/")[-1]
     state_name = soup.find("h1").get_text(strip=True) if soup.find("h1") else state_slug
+
+    city_links: List[str] = []
     for anchor in soup.select("a[href]"):
         href = anchor.get("href", "")
-        if state_slug not in href:
+        if not href.startswith(f"/cemeteries/{state_slug}/"):
             continue
-        if "/cemetery/" not in href and "/cemeteries/" not in href:
+        if href.rstrip("/") == f"/cemeteries/{state_slug}":
             continue
-        name = anchor.get_text(strip=True)
-        if not name:
+        city_links.append(requests.compat.urljoin(state_url, href))
+
+    # Deduplicate while preserving order.
+    seen_city_links: Set[str] = set()
+    unique_city_links: List[str] = []
+    for link in city_links:
+        if link in seen_city_links:
             continue
-        cemetery_url = requests.compat.urljoin(state_url, href)
-        city = anchor.find_parent("li").find_previous("h2").get_text(strip=True) if anchor.find_parent("li") else ""
-        yield state_name, city, name, cemetery_url
+        seen_city_links.add(link)
+        unique_city_links.append(link)
+
+    for city_link in unique_city_links:
+        city_soup = get_soup(city_link)
+        city_name = city_soup.find("h1").get_text(strip=True) if city_soup.find("h1") else city_link.rstrip("/").split("/")[-1].replace("_", " ")
+        for anchor in city_soup.select("a[href*='/cemetery/']"):
+            href = anchor.get("href", "")
+            if "/cemetery/" not in href:
+                continue
+            name = anchor.get_text(strip=True)
+            if not name:
+                continue
+            cemetery_url = requests.compat.urljoin(city_link, href)
+            yield state_name, city_name, name, cemetery_url
 
 
 def load_checkpoint(path: str) -> Tuple[List[CemeteryRecord], Set[str]]:
