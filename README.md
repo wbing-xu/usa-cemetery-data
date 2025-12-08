@@ -13,7 +13,7 @@ pip install -r requirements.txt
 > If you see an error mentioning `openpyxl` when writing Excel files, double-check that
 > `pip install -r requirements.txt` completed successfully.
 
-2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes. Progress is continually written to `cemetery_checkpoint.csv` so you can resume if the process stops unexpectedly:
+2. Run the crawler (internet access required). During the run you will see timestamped progress printed for each state and cemetery, plus a summary when the crawl completes. Progress is continually written to `cemetery_checkpoint.csv` so you can resume if the process stops unexpectedly. If you want to watch results accumulate in real time, add the `--live-preview` flag to keep a separate CSV updated after every cemetery:
 
 ```bash
 # Full crawl (slow) with default checkpointing:
@@ -24,6 +24,9 @@ python scrape_cemeteries.py --limit-states 1 --output test.xlsx
 
 # Resume from a previous checkpoint file (created automatically unless disabled):
 python scrape_cemeteries.py --output resumed.xlsx --checkpoint cemetery_checkpoint.csv
+
+# Watch data collect live in another CSV while still writing checkpoints:
+python scrape_cemeteries.py --live-preview live_progress.csv
 
 # Disable checkpoint writing if you want a one-off run:
 python scrape_cemeteries.py --no-checkpoint

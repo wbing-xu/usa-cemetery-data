@@ -209,12 +209,31 @@ def append_checkpoint(record: CemeteryRecord, path: str) -> None:
     log(f"    • checkpoint saved to {path}")
 
 
+def write_live_preview(records: List[CemeteryRecord], path: str) -> None:
+    """Persist an always-up-to-date CSV so users can inspect progress mid-run."""
+
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CHECKPOINT_FIELDS)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({
+                "state": record.state,
+                "city": record.city,
+                "name": record.name,
+                "area_acres": record.area_acres if record.area_acres is not None else "",
+                "source": record.source or "",
+                "url": record.url,
+            })
+    log(f"    • live preview updated at {path}")
+
+
 def crawl_cemetery_areas(
     limit_states: Optional[int] = None,
     delay: float = 0.5,
     records: Optional[List[CemeteryRecord]] = None,
     processed_urls: Optional[Set[str]] = None,
     checkpoint_path: Optional[str] = None,
+    live_preview_path: Optional[str] = None,
 ) -> List[CemeteryRecord]:
     records = records or []
     processed_urls = processed_urls or set()
@@ -250,6 +269,8 @@ def crawl_cemetery_areas(
             processed_urls.add(url)
             if checkpoint_path:
                 append_checkpoint(record, checkpoint_path)
+            if live_preview_path:
+                write_live_preview(records, live_preview_path)
             time.sleep(delay)
         log(
             f"Finished state {state_link} — processed {state_cemeteries} cemeteries, "
@@ -320,6 +341,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Disable writing checkpoint CSVs (progress cannot be resumed).",
     )
+    parser.add_argument(
+        "--live-preview",
+        default=None,
+        help=(
+            "Path to a CSV that is rewritten after each cemetery so you can open "
+            "it while the crawl runs to view current results."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -344,6 +373,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             records=records,
             processed_urls=processed_urls,
             checkpoint_path=checkpoint_path,
+            live_preview_path=args.live_preview,
         )
     except KeyboardInterrupt:
         log("Interrupted by user — exporting partial progress from checkpoint and memory.")
