@@ -64,6 +64,24 @@ If you do not see any output:
 - Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs.
 - If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off.
 
+## Cleaning an existing checkpoint
+
+If you already have a `cemetery_checkpoint2.csv` file and want to keep only verified acreage rows:
+
+```bash
+# Produces validated_cemetery_areas.csv with columns: cemetery_name, area_acres, area_source
+python process_checkpoint.py --input cemetery_checkpoint2.csv --output validated_cemetery_areas.csv
+```
+
+The cleaning script performs the requested steps automatically:
+
+- Keeps only `area_acres` and `area_source`, drops rows without acreage, and filters sources that mention "cemetery" (case-insensitive).
+- Removes duplicate `(area_acres, area_source)` combinations.
+- Adds a leading `cemetery_name` column by stripping `https://en.wikipedia.org/wiki/` from each `area_source` URL.
+- Re-fetches every `area_source` page to confirm the acreage still matches the stored `area_acres` (default tolerance ±0.1 acres). Rows that fail to match are excluded, and failures are reported in the log.
+
+> Use `--skip-validation` if you need to run without internet access, but the output will not be cross-checked against the source pages.
+
 ## Environment limitations
 
 This repository was authored in an offline environment, so the crawler could not be executed or validated here. Ensure you run it with network access and review the results for accuracy.
