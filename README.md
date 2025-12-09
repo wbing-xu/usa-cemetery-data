@@ -39,7 +39,7 @@ The script writes `cemetery_areas.xlsx` with two sheets:
 
 Checkpoint and live-preview CSVs keep two separate link columns so you can validate data after interruptions:
 
-- `area_source`: the page that provided the acreage value (saved only when an area is found).
+- `area_source`: the page that provided the acreage value (saved only when an area is found). The crawler only accepts acreage values that appear in an "Area" infobox row or alongside acreage-related wording on the page so the saved link can be re-checked for accuracy.
 - `cemetery_url`: the original PeopleLegacy listing used to find the cemetery (the scraper now follows the state page into each city page and finally into the cemetery detail page, so this link points at the individual cemetery, not just the city listing).
 
 > **Note:** The scraper relies on the current HTML structure of https://peoplelegacy.com/cemeteries/. If the site changes, you may need to adjust the CSS selectors inside `scrape_cemeteries.py`. Wikipedia searches may not return acreage for every cemetery; rows without acreage are skipped from the distribution calculation.
@@ -61,7 +61,7 @@ If you do not see any output:
 
 - Ensure you are running with internet access (PeopleLegacy and Wikipedia are both required).
 - Try the smoke-test command above to verify progress logging.
-- Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs.
+- Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs. Automatic retries with backoff are enabled for transient errors (429/5xx). When Wikipedia or PeopleLegacy pages fail to load, the error is logged and the crawler continues to the next cemetery instead of stopping the run.
 - If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off.
 
 ## Cleaning an existing checkpoint

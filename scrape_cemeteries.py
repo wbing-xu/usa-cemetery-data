@@ -10,10 +10,31 @@ from typing import Iterable, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://peoplelegacy.com/cemeteries/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; data-request-script/1.0)"}
+
+
+def build_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update(HEADERS)
+    return session
+
+
+SESSION = build_session()
 
 
 def log(message: str) -> None:
@@ -22,7 +43,7 @@ def log(message: str) -> None:
 
 
 def get_soup(url: str) -> BeautifulSoup:
-    response = requests.get(url, headers=HEADERS, timeout=30)
+    response = SESSION.get(url, timeout=30)
     response.raise_for_status()
     return BeautifulSoup(response.text, "html.parser")
 
@@ -102,6 +123,65 @@ def extract_area(text: str) -> Optional[float]:
     return None
 
 
+def extract_area_with_context(text: str) -> Optional[float]:
+    """Return an acreage only when it appears near area keywords."""
+
+    lowered = text.lower()
+    for pattern in AREA_PATTERNS:
+        for match in pattern.finditer(text):
+            start = max(match.start() - 40, 0)
+            end = min(match.end() + 40, len(text))
+            context = lowered[start:end]
+            if not re.search(r"area|acreage", context):
+                continue
+            raw = match.group(1).replace(",", "")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if "ha" in pattern.pattern.lower():
+                return value * 2.47105
+            return value
+    return None
+
+
+def extract_infobox_area(soup: BeautifulSoup) -> Optional[float]:
+    for table in soup.select("table.infobox"):
+        for row in table.select("tr"):
+            header = row.find("th")
+            if not header:
+                continue
+            if "area" not in header.get_text(" ", strip=True).lower():
+                continue
+            data = row.find("td")
+            if not data:
+                continue
+            candidate = data.get_text(" ", strip=True)
+            area = extract_area(candidate)
+            if area is not None:
+                return area
+    return None
+
+
+def extract_area_from_page(soup: BeautifulSoup) -> Optional[float]:
+    """Prefer infobox area rows, otherwise search nearby acreage text."""
+
+    area = extract_infobox_area(soup)
+    if area is not None:
+        return area
+
+    for element in soup.select("p, li, span"):
+        snippet = element.get_text(" ", strip=True)
+        if not re.search(r"area|acreage", snippet, re.IGNORECASE):
+            continue
+        area = extract_area(snippet)
+        if area is not None:
+            return area
+
+    page_text = soup.get_text(" ", strip=True)
+    return extract_area_with_context(page_text)
+
+
 def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
     params = {
         "action": "query",
@@ -110,38 +190,35 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
         "srsearch": query,
         "srlimit": 1,
     }
-    search_response = requests.get(
-        "https://en.wikipedia.org/w/api.php", params=params, headers=HEADERS, timeout=30
-    )
-    search_response.raise_for_status()
+    try:
+        search_response = SESSION.get(
+            "https://en.wikipedia.org/w/api.php", params=params, timeout=30
+        )
+        search_response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        log(f"      wikipedia search failed for '{query}': {exc}")
+        return None, None
+
     data = search_response.json()
     if not data.get("query", {}).get("search"):
         return None, None
     page_title = data["query"]["search"][0]["title"]
-
-    page_response = requests.get(
-        "https://en.wikipedia.org/w/api.php",
-        params={
-            "action": "query",
-            "prop": "extracts",
-            "exintro": 1,
-            "explaintext": 1,
-            "titles": page_title,
-            "format": "json",
-        },
-        headers=HEADERS,
-        timeout=30,
-    )
-    page_response.raise_for_status()
-    page_data = page_response.json()
-    pages = page_data.get("query", {}).get("pages", {})
-    if not pages:
-        return None, None
-    page = next(iter(pages.values()))
-    extract = page.get("extract", "")
-    area = extract_area(extract)
     page_url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
-    return area, page_url if area is not None else None
+
+    try:
+        page_response = SESSION.get(page_url, timeout=30)
+        page_response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        log(f"      failed to fetch wikipedia page {page_url}: {exc}")
+        return None, None
+
+    soup = BeautifulSoup(page_response.text, "html.parser")
+    area = extract_area_from_page(soup)
+    if area is None:
+        log(f"      no acreage detected on wikipedia page {page_url}")
+        return None, None
+
+    return area, page_url
 
 
 def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
@@ -154,7 +231,11 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
     checks.
     """
 
-    soup = get_soup(state_url)
+    try:
+        soup = get_soup(state_url)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  • failed to load state page {state_url}: {exc}")
+        return
     state_slug = state_url.rstrip("/").split("/")[-1]
     state_name = soup.find("h1").get_text(strip=True) if soup.find("h1") else state_slug
 
@@ -177,7 +258,11 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
         unique_city_links.append(link)
 
     for city_link in unique_city_links:
-        city_soup = get_soup(city_link)
+        try:
+            city_soup = get_soup(city_link)
+        except Exception as exc:  # noqa: BLE001
+            log(f"  • failed to load city page {city_link}: {exc}")
+            continue
         city_name = city_soup.find("h1").get_text(strip=True) if city_soup.find("h1") else city_link.rstrip("/").split("/")[-1].replace("_", " ")
         for anchor in city_soup.select("a[href*='/cemetery/']"):
             href = anchor.get("href", "")
@@ -287,7 +372,13 @@ def crawl_cemetery_areas(
             state_cemeteries += 1
             total_cemeteries += 1
             log(f"  - ({count}) {name} ({city}, {state}) -> searching area")
-            area, source = search_wikipedia_area(f"{name} {city} {state} cemetery area")
+            try:
+                area, source = search_wikipedia_area(
+                    f"{name} {city} {state} cemetery area"
+                )
+            except Exception as exc:  # noqa: BLE001
+                log(f"    • error while searching wikipedia: {exc}")
+                area, source = None, None
             if area is not None:
                 state_with_area += 1
                 total_with_area += 1
