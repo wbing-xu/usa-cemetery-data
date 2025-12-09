@@ -20,8 +20,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; data-request-script/1.0)"}
 
 def build_session() -> requests.Session:
     retry = Retry(
-        total=3,
-        backoff_factor=1,
+        total=5,
+        backoff_factor=2,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=frozenset(["GET"]),
         raise_on_status=False,
@@ -42,13 +42,54 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", flush=True)
 
 
-def get_soup(url: str) -> BeautifulSoup:
-    response = SESSION.get(url, timeout=30)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
+def fetch_html_with_backoff(
+    url: str, *, request_delay: float = 0.0, attempts: int = 5
+) -> str:
+    """Fetch HTML with explicit backoff for 429 responses and transient errors.
+
+    A Retry adapter is mounted on the session, but PeopleLegacy sometimes
+    returns 429s. This helper explicitly sleeps on 429s (honoring Retry-After
+    when present) and backs off between other failures so crawls keep moving
+    instead of failing early.
+    """
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = SESSION.get(url, timeout=30)
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    wait_seconds = float(retry_after) if retry_after else 0.0
+                except ValueError:
+                    wait_seconds = 0.0
+                wait_seconds = max(wait_seconds, max(request_delay, attempt))
+                log(
+                    f"      Too Many Requests for {url} — sleeping {wait_seconds:.1f}s "
+                    f"(attempt {attempt}/{attempts})"
+                )
+                time.sleep(wait_seconds)
+                continue
+            response.raise_for_status()
+            if request_delay:
+                time.sleep(request_delay)
+            return response.text
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            if attempt >= attempts:
+                break
+            wait_seconds = max(request_delay, min(30.0, 2.0**attempt))
+            log(
+                f"      Request error for {url}: {exc} — retrying in {wait_seconds:.1f}s "
+                f"(attempt {attempt}/{attempts})"
+            )
+            time.sleep(wait_seconds)
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"Failed to fetch {url}")
 
 
-def extract_state_links() -> List[str]:
+def extract_state_links(request_delay: float) -> List[str]:
     """Return absolute URLs for each state on the directory page.
 
     The PeopleLegacy directory lists states as links under the base cemeteries
@@ -58,7 +99,9 @@ def extract_state_links() -> List[str]:
     """
 
     log("Fetching state directory page...")
-    soup = get_soup(BASE_URL)
+    soup = BeautifulSoup(
+        fetch_html_with_backoff(BASE_URL, request_delay=request_delay), "html.parser"
+    )
     links = []
     for anchor in soup.select("a[href]"):
         href = anchor.get("href", "")
@@ -221,7 +264,9 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
     return area, page_url
 
 
-def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
+def parse_cemetery_list(
+    state_url: str, *, request_delay: float
+) -> Iterable[tuple[str, str, str, str]]:
     """Yield (state, city, name, cemetery_url) entries for a state.
 
     PeopleLegacy lists cities on each state page, and each city page lists the
@@ -232,7 +277,10 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
     """
 
     try:
-        soup = get_soup(state_url)
+        soup = BeautifulSoup(
+            fetch_html_with_backoff(state_url, request_delay=request_delay),
+            "html.parser",
+        )
     except Exception as exc:  # noqa: BLE001
         log(f"  • failed to load state page {state_url}: {exc}")
         return
@@ -259,7 +307,10 @@ def parse_cemetery_list(state_url: str) -> Iterable[tuple[str, str, str, str]]:
 
     for city_link in unique_city_links:
         try:
-            city_soup = get_soup(city_link)
+            city_soup = BeautifulSoup(
+                fetch_html_with_backoff(city_link, request_delay=request_delay),
+                "html.parser",
+            )
         except Exception as exc:  # noqa: BLE001
             log(f"  • failed to load city page {city_link}: {exc}")
             continue
@@ -343,6 +394,7 @@ def write_live_preview(records: List[CemeteryRecord], path: str) -> None:
 def crawl_cemetery_areas(
     limit_states: Optional[int] = None,
     delay: float = 0.5,
+    peoplelegacy_delay: float = 1.0,
     records: Optional[List[CemeteryRecord]] = None,
     processed_urls: Optional[Set[str]] = None,
     checkpoint_path: Optional[str] = None,
@@ -350,7 +402,7 @@ def crawl_cemetery_areas(
 ) -> List[CemeteryRecord]:
     records = records or []
     processed_urls = processed_urls or set()
-    state_links = extract_state_links()
+    state_links = extract_state_links(peoplelegacy_delay)
     total_states = len(state_links)
     log(f"Found {total_states} state links. Starting crawl...")
     total_cemeteries = len(processed_urls)
@@ -362,7 +414,7 @@ def crawl_cemetery_areas(
         state_cemeteries = 0
         state_with_area = 0
         for count, (state, city, name, cemetery_url) in enumerate(
-            parse_cemetery_list(state_link), start=1
+            parse_cemetery_list(state_link, request_delay=peoplelegacy_delay), start=1
         ):
             if cemetery_url in processed_urls:
                 log(
@@ -462,6 +514,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--delay", type=float, default=0.5, help="Seconds to sleep between Wikipedia requests to be polite."
     )
     parser.add_argument(
+        "--peoplelegacy-delay",
+        type=float,
+        default=1.0,
+        help=(
+            "Seconds to sleep after each PeopleLegacy request; increase if you see "
+            "429 Too Many Requests responses."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint",
         default="cemetery_checkpoint.csv",
         help="CSV file used to save progress while crawling (also used to resume).",
@@ -497,12 +558,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         "Watch the log messages for progress."
     )
     try:
-        crawl_cemetery_areas(
-            limit_states=args.limit_states,
-            delay=args.delay,
-            records=records,
-            processed_urls=processed_urls,
-            checkpoint_path=checkpoint_path,
+            crawl_cemetery_areas(
+                limit_states=args.limit_states,
+                delay=args.delay,
+                peoplelegacy_delay=args.peoplelegacy_delay,
+                records=records,
+                processed_urls=processed_urls,
+                checkpoint_path=checkpoint_path,
             live_preview_path=args.live_preview,
         )
     except KeyboardInterrupt:

@@ -62,6 +62,7 @@ If you do not see any output:
 - Ensure you are running with internet access (PeopleLegacy and Wikipedia are both required).
 - Try the smoke-test command above to verify progress logging.
 - Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs. Automatic retries with backoff are enabled for transient errors (429/5xx). When Wikipedia or PeopleLegacy pages fail to load, the error is logged and the crawler continues to the next cemetery instead of stopping the run.
+- If PeopleLegacy returns “Too Many Requests” (429) messages, re-run with a higher `--peoplelegacy-delay` (default is 1 second) so the scraper sleeps between PeopleLegacy page fetches. The crawler will also honor `Retry-After` headers and back off before retrying.
 - If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off.
 
 ## Cleaning an existing checkpoint
