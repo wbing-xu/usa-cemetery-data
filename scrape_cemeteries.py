@@ -1,11 +1,14 @@
 import argparse
 import csv
 import os
+import random
 import re
 import sys
 import time
 from dataclasses import asdict, dataclass
 from typing import Iterable, List, Optional, Set, Tuple
+import concurrent.futures
+import threading
 
 import numpy as np
 import pandas as pd
@@ -42,8 +45,14 @@ def log(message: str) -> None:
     print(f"[{timestamp}] {message}", flush=True)
 
 
+def jittered_delay(base: float, jitter: float) -> float:
+    if base <= 0 and jitter <= 0:
+        return 0.0
+    return max(0.0, base + random.uniform(0, max(jitter, 0.0)))
+
+
 def fetch_html_with_backoff(
-    url: str, *, request_delay: float = 0.0, attempts: int = 5
+    url: str, *, request_delay: float = 0.0, jitter: float = 0.0, attempts: int = 5
 ) -> str:
     """Fetch HTML with explicit backoff for 429 responses and transient errors.
 
@@ -64,6 +73,7 @@ def fetch_html_with_backoff(
                 except ValueError:
                     wait_seconds = 0.0
                 wait_seconds = max(wait_seconds, max(request_delay, attempt))
+                wait_seconds = jittered_delay(wait_seconds, jitter)
                 log(
                     f"      Too Many Requests for {url} — sleeping {wait_seconds:.1f}s "
                     f"(attempt {attempt}/{attempts})"
@@ -71,14 +81,16 @@ def fetch_html_with_backoff(
                 time.sleep(wait_seconds)
                 continue
             response.raise_for_status()
-            if request_delay:
-                time.sleep(request_delay)
+            if request_delay or jitter:
+                time.sleep(jittered_delay(request_delay, jitter))
             return response.text
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if attempt >= attempts:
                 break
-            wait_seconds = max(request_delay, min(30.0, 2.0**attempt))
+            wait_seconds = jittered_delay(
+                max(request_delay, min(30.0, 2.0**attempt)), jitter
+            )
             log(
                 f"      Request error for {url}: {exc} — retrying in {wait_seconds:.1f}s "
                 f"(attempt {attempt}/{attempts})"
@@ -89,7 +101,7 @@ def fetch_html_with_backoff(
     raise RuntimeError(f"Failed to fetch {url}")
 
 
-def extract_state_links(request_delay: float) -> List[str]:
+def extract_state_links(request_delay: float, jitter: float) -> List[str]:
     """Return absolute URLs for each state on the directory page.
 
     The PeopleLegacy directory lists states as links under the base cemeteries
@@ -100,7 +112,10 @@ def extract_state_links(request_delay: float) -> List[str]:
 
     log("Fetching state directory page...")
     soup = BeautifulSoup(
-        fetch_html_with_backoff(BASE_URL, request_delay=request_delay), "html.parser"
+        fetch_html_with_backoff(
+            BASE_URL, request_delay=request_delay, jitter=jitter
+        ),
+        "html.parser",
     )
     links = []
     for anchor in soup.select("a[href]"):
@@ -225,7 +240,9 @@ def extract_area_from_page(soup: BeautifulSoup) -> Optional[float]:
     return extract_area_with_context(page_text)
 
 
-def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
+def search_wikipedia_area(
+    query: str, *, request_delay: float, jitter: float
+) -> tuple[Optional[float], Optional[str]]:
     params = {
         "action": "query",
         "list": "search",
@@ -238,6 +255,8 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
             "https://en.wikipedia.org/w/api.php", params=params, timeout=30
         )
         search_response.raise_for_status()
+        if request_delay or jitter:
+            time.sleep(jittered_delay(request_delay, jitter))
     except Exception as exc:  # noqa: BLE001
         log(f"      wikipedia search failed for '{query}': {exc}")
         return None, None
@@ -251,6 +270,8 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
     try:
         page_response = SESSION.get(page_url, timeout=30)
         page_response.raise_for_status()
+        if request_delay or jitter:
+            time.sleep(jittered_delay(request_delay, jitter))
     except Exception as exc:  # noqa: BLE001
         log(f"      failed to fetch wikipedia page {page_url}: {exc}")
         return None, None
@@ -265,7 +286,7 @@ def search_wikipedia_area(query: str) -> tuple[Optional[float], Optional[str]]:
 
 
 def parse_cemetery_list(
-    state_url: str, *, request_delay: float
+    state_url: str, *, request_delay: float, jitter: float
 ) -> Iterable[tuple[str, str, str, str]]:
     """Yield (state, city, name, cemetery_url) entries for a state.
 
@@ -278,7 +299,9 @@ def parse_cemetery_list(
 
     try:
         soup = BeautifulSoup(
-            fetch_html_with_backoff(state_url, request_delay=request_delay),
+            fetch_html_with_backoff(
+                state_url, request_delay=request_delay, jitter=jitter
+            ),
             "html.parser",
         )
     except Exception as exc:  # noqa: BLE001
@@ -308,7 +331,9 @@ def parse_cemetery_list(
     for city_link in unique_city_links:
         try:
             city_soup = BeautifulSoup(
-                fetch_html_with_backoff(city_link, request_delay=request_delay),
+                fetch_html_with_backoff(
+                    city_link, request_delay=request_delay, jitter=jitter
+                ),
                 "html.parser",
             )
         except Exception as exc:  # noqa: BLE001
@@ -393,8 +418,11 @@ def write_live_preview(records: List[CemeteryRecord], path: str) -> None:
 
 def crawl_cemetery_areas(
     limit_states: Optional[int] = None,
-    delay: float = 0.5,
-    peoplelegacy_delay: float = 1.0,
+    delay: float = 0.25,
+    peoplelegacy_delay: float = 0.5,
+    delay_jitter: float = 0.25,
+    peoplelegacy_jitter: float = 0.35,
+    max_workers: int = 4,
     records: Optional[List[CemeteryRecord]] = None,
     processed_urls: Optional[Set[str]] = None,
     checkpoint_path: Optional[str] = None,
@@ -402,56 +430,87 @@ def crawl_cemetery_areas(
 ) -> List[CemeteryRecord]:
     records = records or []
     processed_urls = processed_urls or set()
-    state_links = extract_state_links(peoplelegacy_delay)
+    state_links = extract_state_links(peoplelegacy_delay, peoplelegacy_jitter)
     total_states = len(state_links)
     log(f"Found {total_states} state links. Starting crawl...")
     total_cemeteries = len(processed_urls)
     total_with_area = len([r for r in records if r.area_acres is not None])
+    checkpoint_lock = threading.Lock()
+    write_lock = threading.Lock()
+    worker_count = max(1, max_workers)
     for idx, state_link in enumerate(state_links):
         if limit_states is not None and idx >= limit_states:
             break
         log(f"[{idx + 1}/{total_states}] Crawling {state_link} ...")
         state_cemeteries = 0
         state_with_area = 0
-        for count, (state, city, name, cemetery_url) in enumerate(
-            parse_cemetery_list(state_link, request_delay=peoplelegacy_delay), start=1
-        ):
-            if cemetery_url in processed_urls:
+        state_futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for count, (state, city, name, cemetery_url) in enumerate(
+                parse_cemetery_list(
+                    state_link,
+                    request_delay=peoplelegacy_delay,
+                    jitter=peoplelegacy_jitter,
+                ),
+                start=1,
+            ):
+                if cemetery_url in processed_urls:
+                    log(
+                        f"  - ({count}) {name} ({city}, {state}) already processed — skipping"
+                    )
+                    continue
+                state_cemeteries += 1
+                total_cemeteries += 1
+
                 log(
-                    f"  - ({count}) {name} ({city}, {state}) already processed — skipping"
+                    f"  - ({count}) {name} ({city}, {state}) -> queueing area lookup"
                 )
-                continue
-            state_cemeteries += 1
-            total_cemeteries += 1
-            log(f"  - ({count}) {name} ({city}, {state}) -> searching area")
-            try:
-                area, source = search_wikipedia_area(
-                    f"{name} {city} {state} cemetery area"
+
+                def process_entry(
+                    state: str,
+                    city: str,
+                    name: str,
+                    cemetery_url: str,
+                ) -> CemeteryRecord:
+                    try:
+                        area, source = search_wikipedia_area(
+                            f"{name} {city} {state} cemetery area",
+                            request_delay=delay,
+                            jitter=delay_jitter,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log(f"    • error while searching wikipedia: {exc}")
+                        area, source = None, None
+                    if area is not None:
+                        log(f"    • area found for {name}: {area:.2f} acres")
+                    else:
+                        log(f"    • no area found for {name}")
+                    return CemeteryRecord(
+                        state=state,
+                        city=city,
+                        name=name,
+                        area_acres=area,
+                        area_source=source,
+                        cemetery_url=cemetery_url,
+                    )
+
+                state_futures.append(
+                    executor.submit(process_entry, state, city, name, cemetery_url)
                 )
-            except Exception as exc:  # noqa: BLE001
-                log(f"    • error while searching wikipedia: {exc}")
-                area, source = None, None
-            if area is not None:
-                state_with_area += 1
-                total_with_area += 1
-                log(f"    • area found: {area:.2f} acres")
-            else:
-                log("    • no area found")
-            record = CemeteryRecord(
-                state=state,
-                city=city,
-                name=name,
-                area_acres=area,
-                area_source=source,
-                cemetery_url=cemetery_url,
-            )
-            records.append(record)
-            processed_urls.add(cemetery_url)
-            if checkpoint_path:
-                append_checkpoint(record, checkpoint_path)
-            if live_preview_path:
-                write_live_preview(records, live_preview_path)
-            time.sleep(delay)
+
+            for future in concurrent.futures.as_completed(state_futures):
+                record = future.result()
+                if record.area_acres is not None:
+                    state_with_area += 1
+                    total_with_area += 1
+                records.append(record)
+                processed_urls.add(record.cemetery_url)
+                if checkpoint_path:
+                    with checkpoint_lock:
+                        append_checkpoint(record, checkpoint_path)
+                if live_preview_path:
+                    with write_lock:
+                        write_live_preview(records, live_preview_path)
         log(
             f"Finished state {state_link} — processed {state_cemeteries} cemeteries, "
             f"found areas for {state_with_area}"
@@ -511,16 +570,37 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Limit how many state pages to crawl (useful for quick tests).",
     )
     parser.add_argument(
-        "--delay", type=float, default=0.5, help="Seconds to sleep between Wikipedia requests to be polite."
+        "--delay",
+        type=float,
+        default=0.25,
+        help="Base seconds to sleep between Wikipedia requests to be polite.",
     )
     parser.add_argument(
         "--peoplelegacy-delay",
         type=float,
-        default=1.0,
+        default=0.5,
         help=(
             "Seconds to sleep after each PeopleLegacy request; increase if you see "
             "429 Too Many Requests responses."
         ),
+    )
+    parser.add_argument(
+        "--delay-jitter",
+        type=float,
+        default=0.25,
+        help="Randomized jitter (seconds) added to each Wikipedia delay to look less robotic.",
+    )
+    parser.add_argument(
+        "--peoplelegacy-jitter",
+        type=float,
+        default=0.35,
+        help="Randomized jitter (seconds) added to PeopleLegacy delays to avoid patterns.",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="Parallel worker threads for Wikipedia lookups; increase to speed up crawls.",
     )
     parser.add_argument(
         "--checkpoint",
@@ -558,13 +638,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         "Watch the log messages for progress."
     )
     try:
-            crawl_cemetery_areas(
-                limit_states=args.limit_states,
-                delay=args.delay,
-                peoplelegacy_delay=args.peoplelegacy_delay,
-                records=records,
-                processed_urls=processed_urls,
-                checkpoint_path=checkpoint_path,
+        crawl_cemetery_areas(
+            limit_states=args.limit_states,
+            delay=args.delay,
+            peoplelegacy_delay=args.peoplelegacy_delay,
+            delay_jitter=args.delay_jitter,
+            peoplelegacy_jitter=args.peoplelegacy_jitter,
+            max_workers=args.max_workers,
+            records=records,
+            processed_urls=processed_urls,
+            checkpoint_path=checkpoint_path,
             live_preview_path=args.live_preview,
         )
     except KeyboardInterrupt:
