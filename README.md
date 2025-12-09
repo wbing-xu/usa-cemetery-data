@@ -23,6 +23,8 @@ python scrape_cemeteries.py
 python scrape_cemeteries.py --limit-states 1 --output test.xlsx --max-workers 8
 
 # Resume from a previous checkpoint file (created automatically unless disabled):
+# missing areas in the checkpoint are refilled first (without reloading PeopleLegacy)
+# so resuming large runs speeds up immediately.
 python scrape_cemeteries.py --output resumed.xlsx --checkpoint cemetery_checkpoint.csv
 
 # Watch data collect live in another CSV while still writing checkpoints:
@@ -66,7 +68,7 @@ If you do not see any output:
 - Try the smoke-test command above to verify progress logging.
 - Some requests may take up to 30 seconds because of the HTTP timeout; allow the crawl to finish or adjust the `--delay` flag if you need faster runs. Automatic retries with backoff are enabled for transient errors (429/5xx). When Wikipedia or PeopleLegacy pages fail to load, the error is logged and the crawler continues to the next cemetery instead of stopping the run.
 - If PeopleLegacy returns “Too Many Requests” (429) messages, re-run with a higher `--peoplelegacy-delay` (default is 0.5 seconds with added jitter) so the scraper sleeps between PeopleLegacy page fetches. The crawler will also honor `Retry-After` headers and back off before retrying. Pairing small delays with jitter helps avoid anti-scraping throttles while still keeping the run fast.
-- If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off.
+- If you interrupt the crawl (Ctrl+C), the script will still export whatever was collected to both the Excel file and the checkpoint CSV. Re-run with the same `--checkpoint` path to continue where you left off. When resuming, the script first re-queries missing acreage values already listed in the checkpoint (using the cached state/city/name fields) before visiting PeopleLegacy again. This keeps restarts fast even when most cemeteries are already in your checkpoint.
 
 ## Cleaning an existing checkpoint
 

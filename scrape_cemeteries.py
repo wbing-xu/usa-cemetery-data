@@ -416,6 +416,26 @@ def write_live_preview(records: List[CemeteryRecord], path: str) -> None:
     log(f"    • live preview updated at {path}")
 
 
+def rewrite_checkpoint(records: List[CemeteryRecord], path: str) -> None:
+    """Rewrite the checkpoint with the current records (for resume updates)."""
+
+    if not path:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CHECKPOINT_FIELDS)
+        writer.writeheader()
+        for record in records:
+            writer.writerow({
+                "state": record.state,
+                "city": record.city,
+                "name": record.name,
+                "area_acres": record.area_acres if record.area_acres is not None else "",
+                "area_source": record.area_source or "",
+                "cemetery_url": record.cemetery_url,
+            })
+    log(f"    • checkpoint rewritten at {path}")
+
+
 def crawl_cemetery_areas(
     limit_states: Optional[int] = None,
     delay: float = 0.25,
@@ -438,6 +458,42 @@ def crawl_cemetery_areas(
     checkpoint_lock = threading.Lock()
     write_lock = threading.Lock()
     worker_count = max(1, max_workers)
+
+    # Fast path: fill in any missing area values from the checkpoint before
+    # fetching PeopleLegacy pages again. This avoids re-walking state/city
+    # listings when resuming large runs that already discovered most cemeteries.
+    pending_area = [r for r in records if r.area_acres is None]
+    if pending_area:
+        log(
+            f"Resuming {len(pending_area)} records missing acreage from checkpoint — "
+            f"running Wikipedia lookups with {worker_count} workers before crawling."
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_to_record = {}
+            for rec in pending_area:
+                future = executor.submit(
+                    search_wikipedia_area,
+                    f"{rec.name} {rec.city} {rec.state} cemetery area",
+                    request_delay=delay,
+                    jitter=delay_jitter,
+                )
+                future_to_record[future] = rec
+            for future in concurrent.futures.as_completed(future_to_record):
+                rec = future_to_record[future]
+                try:
+                    area, source = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    log(f"    • resume lookup failed for {rec.name}: {exc}")
+                    continue
+                if area is None:
+                    continue
+                rec.area_acres = area
+                rec.area_source = source
+                log(f"    • resume filled area for {rec.name}: {area:.2f} acres")
+        if checkpoint_path:
+            rewrite_checkpoint(records, checkpoint_path)
+        if live_preview_path:
+            write_live_preview(records, live_preview_path)
     for idx, state_link in enumerate(state_links):
         if limit_states is not None and idx >= limit_states:
             break
